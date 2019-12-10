@@ -12,16 +12,30 @@ cordova.commandProxy.add("SSLCertificateChecker", {
   check: function(successCallback, errorCallback, params) {
     var serverURL = params[0];
     // params[1] is irrelevant
-    var allowedSHA1Fingerprints = params[2];
+    var allowedSHA256Fingerprints = params[2];
+    
+    function getCertificateHash(serverCertificate) {
+      var fpHash = serverCertificate.getHashValue("SHA256");
+      var certFp = "";
+      for (var i = 0; i < fpHash.length; i++) {
+        var block = fpHash[i].toString(16);
+        if (block.length == 1) {
+          certFp += "0";
+        }
+        certFp += block;
+      }
+
+      return certFp.toUpperCase();
+    }
 
     if (typeof errorCallback != "function") {
       console.log("SSLCertificateChecker.find failure: errorCallback parameter must be a function");
-      return
+      return;
     }
 
     if (typeof successCallback != "function") {
       console.log("SSLCertificateChecker.find failure: successCallback parameter must be a function");
-      return
+      return;
     }
 
     var hostName;
@@ -46,12 +60,14 @@ cordova.commandProxy.add("SSLCertificateChecker", {
     var stateHolder = {};
     stateHolder.closing = false;
     stateHolder.clientSocket = new Windows.Networking.Sockets.StreamSocket();
+    
+    var errorSent = false;
 
     // Connect to the server
     stateHolder.clientSocket.connectAsync(
-        hostName,
-        443, // port
-        Windows.Networking.Sockets.SocketProtectionLevel.ssl)
+      hostName,
+      "443", // port
+      Windows.Networking.Sockets.SocketProtectionLevel.tls12)
         .then(function () {
           // No SSL errors: return an empty promise and continue processing in the .done function
           return
@@ -61,33 +77,50 @@ cordova.commandProxy.add("SSLCertificateChecker", {
             // ignorable (http or self signed certificate), move on to .done
             return;
           }
+      
           errorCallback("CONNECTION_FAILED. Details: " + reason);
+          errorSent = true;
         })
         .done(function () {
-          // Get detailed certificate information.
+          if (errorSent) {
+            return;
+          }
+      
+          var allCerts = [];
+
           if (stateHolder.clientSocket.information.serverCertificate != null) {
-            var certFp = "";
-            var fpHash = stateHolder.clientSocket.information.serverCertificate.getHashValue();
-            for (var i = 0; i < fpHash.length; i++) {
-              var block = fpHash[i].toString(16);
-              if (block.length == 1) {
-                certFp += "0";
-              }
-              certFp += block;
+            allCerts.push(getCertificateHash(stateHolder.clientSocket.information.serverCertificate));
+          }
+
+          var intermediateCertidicates = stateHolder.clientSocket.information.serverIntermediateCertificates;
+
+          if (intermediateCertidicates != null) {
+            for (var i = 0; i < intermediateCertidicates.length; i++) {
+              allCerts.push(getCertificateHash(intermediateCertidicates[i]));
             }
-            certFp = certFp.toUpperCase();
+          }
 
-            stateHolder.clientSocket.close();
-            stateHolder.clientSocket = null;
+          stateHolder.clientSocket.close();
+          stateHolder.clientSocket = null;
 
-            for (var j = 0; j < allowedSHA1Fingerprints.length; j++) {
-              if (certFp == allowedSHA1Fingerprints[j].toUpperCase().split(' ').join('')) {
+          for (var j = 0; j < allowedSHA256Fingerprints.length; j++) {
+
+            var allowedFingerPrint = allowedSHA256Fingerprints[j].toUpperCase().split(' ').join('');
+
+            for (var i = 0; i < allCerts.length; i++) {
+              var cert = allCerts[i];
+
+              if (cert == allowedFingerPrint) {
                 successCallback("CONNECTION_SECURE");
+            
                 return;
               }
             }
-              errorCallback("CONNECTION_NOT_SECURE");
-            }
+
+          }
+
+          errorCallback("CONNECTION_NOT_SECURE");
+
         }, function (reason) {
           // If this is an unknown status it means that the error is fatal and retry will likely fail.
           if (("number" in reason) &&
